@@ -1,10 +1,12 @@
 import warnings
 from collections import namedtuple
-from typing import Literal, Optional, Sequence, TypedDict
+from typing import Literal, Sequence, TypedDict, Optional
 
+from SFAT.ops import center
+from SFAT.ops import mldivide, mrdivide, add_diag
 import numpy as np
 import numpy.typing as npt
-from scipy.linalg import issymmetric, lstsq, solve, svd
+from scipy.linalg import svd
 from scipy.stats import multivariate_normal
 
 SMALL = 1e-12
@@ -23,56 +25,6 @@ class InitDict(TypedDict, total=False):
     var_s: np.ndarray
     var_t: np.ndarray
     var_y: np.ndarray
-
-
-def center(X, axis=0):
-    """center data
-
-    Parameters
-    ----------
-    X : ndarray
-        Data matrix
-    axis : int, optional
-        centered axis, by default 0
-
-    Returns
-    -------
-    X_hat : ndarray
-        Centered X
-    mean : ndarray
-        Means of the original X
-    """
-    mean = np.mean(X, axis=axis, keepdims=True)
-    return X - mean, np.squeeze(mean, axis=axis)
-
-
-def add_diag(M, value):
-    """Add value to the diagnal of a matrix inplace, and return self"""
-    M.flat[: M.shape[1] ** 2 : M.shape[1] + 1] += value
-    return M
-
-
-def mldivide(A, B, sym_a: Optional[bool] = None):
-    r"""same as A\B (in matlab) or pinv(A) @ B"""
-    if A.ndim == 1:
-        raise ValueError("The first argument needs to be a matrix.")
-    if A.ndim == 2 and A.shape[0] == A.shape[1]:
-        if sym_a == True or (sym_a is None and issymmetric(A)):
-            return solve(A, B, assume_a="sym")
-        else:
-            return solve(A, B)
-    else:
-        return lstsq(A, B)[0]
-
-
-def mrdivide(A, B, sym_b: Optional[bool] = None):
-    """same as A/B (in matlab) or A @ pinv(B)"""
-    if B.ndim == 1:
-        raise ValueError("The second argument needs to be a matrix.")
-    if A.ndim == 1:
-        A = A[None, :]
-        return mldivide(B.T, A.T, sym_a=sym_b).squeeze(1)
-    return mldivide(B.T, A.T, sym_a=sym_b).T
 
 
 def my_svd(X, n_components):
@@ -139,7 +91,7 @@ def _init_svd(X, n_comp):
     _, _, Ah = svd(X)
     A = Ah.T[:, :n_comp]
     if A.shape[1] != n_comp:
-        raise NotImplementedError()
+        return np.hstack((A, np.random.rand(A.shape[0], A.shape[1] - n_comp)))
     return A
 
 
@@ -177,7 +129,7 @@ def _return_as(
         return data
 
 
-class SpervisedLVGA:
+class SFAT:
     def __init__(
         self,
         n_share_comp,
@@ -187,11 +139,12 @@ class SpervisedLVGA:
         ) = "none",
         solver: Literal["svd", "em"] = "svd",
         init_method: Literal["svd", "random", "custom"] = "svd",
-        init_values: InitDict | None = None,
-        rotation: Literal["varimax", "quartimax"] | None = None,
+        init_values: Optional[InitDict]= None,
+        rotation: Optional[Literal["varimax", "quartimax"]] = None,
         max_iter=5000,
         tol=1e-4,
     ) -> None:
+        
         self.n_share_comp = n_share_comp
         self.n_spec_comp = n_spec_comp
         self.variance_constraints = variance_constraints
@@ -431,27 +384,27 @@ class SpervisedLVGA:
     def posterior(
         self,
         data,
-        cond_on: Literal["Xs", "Xt", "Y", "Z"] = "Xt",
-        pred_to: Literal["Xs", "Xt", "Y", "Z"] = "Xs",
+        cond_on: Literal["s", "t", "y", "z"] = "t",
+        pred_to: Literal["s", "t", "y", "z"] = "s",
         return_as: Literal["array", "dist", "namedtuple"] = "array",
     ):
         if cond_on == pred_to:
             raise ValueError()
 
-        if cond_on == "Z":
+        if cond_on == "z":
             W = self.get_W(pred_to)
             B = self.get_B(pred_to)
             mu = self.get_mean(pred_to)
             var = self.get_var(pred_to)
             cov = np.diag(var)
-            if pred_to == "Y":
+            if pred_to == "y":
                 data = data[:, : self.n_share_comp]
                 results = [MVNParam(mean=mu + W @ z, cov=cov) for z in data]
                 return _return_as(results, to=return_as)
             A = np.vstack((W, B))
             results = [MVNParam(mean=mu + A @ z, cov=cov) for z in data]
             return _return_as(results, to=return_as)
-        elif pred_to == "Z":
+        elif pred_to == "z":
             W = self.get_W(cond_on)
             B = self.get_B(cond_on)
             mu = self.get_mean(cond_on)
@@ -496,46 +449,46 @@ class SpervisedLVGA:
             ]
             return _return_as(results, to=return_as)
 
-    def get_mean(self, varname: Literal["Xs", "Xt", "Y", "Z"]):
+    def get_mean(self, varname: Literal["s", "t", "y"]):
         match varname:
-            case "Xs":
+            case "s":
                 return self.Xs_mean_
-            case "Xt":
+            case "t":
                 return self.Xt_mean_
-            case "Y":
+            case "y":
                 return self.Y_mean_
             case _:
                 raise ValueError()
 
-    def get_W(self, varname: Literal["Xs", "Xt", "Y"]):
+    def get_W(self, varname: Literal["s", "t", "y"]):
         match varname:
-            case "Xs":
+            case "s":
                 return self.W_s
-            case "Xt":
+            case "t":
                 return self.W_t
-            case "Y":
+            case "y":
                 return self.W_y
             case _:
                 raise ValueError()
 
-    def get_B(self, varname: Literal["Xs", "Xt", "Y"]):
+    def get_B(self, varname: Literal["s", "t", "y"]):
         match varname:
-            case "Xs":
+            case "s":
                 return self.B_s
-            case "Xt":
+            case "t":
                 return self.B_t
-            case "Y":
+            case "y":
                 return np.zeros((self.W_y.shape[0], self.B_t.shape[1]))
             case _:
                 raise ValueError()
 
-    def get_var(self, varname: Literal["Xs", "Xt", "Y"]):
+    def get_var(self, varname: Literal["s", "t", "y"]):
         match varname:
-            case "Xs":
+            case "s":
                 return self.var_s
-            case "Xt":
+            case "t":
                 return self.var_t
-            case "Y":
+            case "y":
                 return self.var_y
             case _:
                 raise ValueError()
@@ -576,13 +529,13 @@ class SpervisedLVGA:
         elif reduction == "sum":
             return ll.sum() + full_data.shape[0] * const
         else:
-            raise ValueError()
+            raise ValueError() 
 
     def transform(
         self,
         data,
-        cond_on: Literal["Xs", "Xt", "Y", "Z"] = "Xt",
-        pred_to: Literal["Xs", "Xt", "Y", "Z"] = "Xs",
+        cond_on: Literal["s", "t", "y", "z"] = "t",
+        pred_to: Literal["s", "t", "y", "z"] = "s",
     ):
         return self.posterior(
             data, cond_on=cond_on, pred_to=pred_to, return_as="array"
