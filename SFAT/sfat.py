@@ -140,7 +140,7 @@ class SFAT:
         solver: Literal["svd", "em"] = "svd",
         init_method: Literal["svd", "random", "custom"] = "svd",
         init_values: Optional[InitDict]= None,
-        rotation: Optional[Literal["varimax", "quartimax"]] = None,
+        rotation: Optional[Literal["varimax", "quartimax", "orthonormal"]] = None,
         max_iter=5000,
         tol=1e-4,
     ) -> None:
@@ -286,13 +286,19 @@ class SFAT:
 
         if self.rotation is not None:
             R_share = _householder_rotate(W_y)
-            R_spec = _meaningful_rotate(np.vstack((B_s, B_t)), method=self.rotation)
             W_s = W_s @ R_share
             W_t = W_t @ R_share
             W_y = W_y @ R_share
 
-            B_s = B_s @ R_spec
-            B_t = B_t @ R_spec
+            B_st = np.vstack((B_s, B_t))
+            if self.rotation == 'orthonormal':
+                u, s, _ = svd(B_st, full_matrices=False)
+                B_st = u * s
+                B_s, B_t = np.vsplit(B_st, [nfeat_s])
+            else:
+                R_spec = _meaningful_rotate(B_st, method=self.rotation)
+                B_s = B_s @ R_spec
+                B_t = B_t @ R_spec
 
         self.loglike_ = loglike
         var_s, var_t, var_y = np.split(Phi, [nfeat_s, nfeat_s + nfeat_t])
@@ -373,9 +379,15 @@ class SFAT:
         W_y, _ = np.hsplit(Ay, [self.n_share_comp])
 
         if self.rotation is not None:
-            R_spec = _meaningful_rotate(np.vstack((B_s, B_t)), method=self.rotation)
-            B_s = B_s @ R_spec
-            B_t = B_t @ R_spec
+            B_st = np.vstack((B_s, B_t))
+            if self.rotation == 'orthonormal':
+                u, s, _ = svd(B_st, full_matrices=False)
+                B_st = u * s
+                B_s, B_t = np.vsplit(B_st, [nfeat_s])
+            else:
+                R_spec = _meaningful_rotate(B_st, method=self.rotation)
+                B_s = B_s @ R_spec
+                B_t = B_t @ R_spec
 
         var_s, var_t, var_y = np.split(Phi, [nfeat_s, nfeat_s + nfeat_t])
         self.loglike_ = loglike
@@ -540,3 +552,16 @@ class SFAT:
         return self.posterior(
             data, cond_on=cond_on, pred_to=pred_to, return_as="array"
         )[0]
+
+    def rotate_to(self, rotate_type:Literal["varimax", "quartimax", "orthonormal"]):
+        nfeat_s = self.B_s.shape[0]
+        B_st = np.vstack((self.B_s, self.B_t))
+        if rotate_type == 'orthonormal':
+            u, s, _ = svd(B_st, full_matrices=False)
+            B_st = u * s
+            self.B_s, self.B_t = np.vsplit(B_st, [nfeat_s])
+        else:
+            R_spec = _meaningful_rotate(B_st, method=rotate_type)
+            self.B_s = self.B_s @ R_spec
+            self.B_t = self.B_t @ R_spec
+        self.rotation = rotate_type
